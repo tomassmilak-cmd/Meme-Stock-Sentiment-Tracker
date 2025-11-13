@@ -1,4 +1,4 @@
-"""Stock price service using Polygon.io API."""
+"""Stock price service using Massive.com API (formerly Polygon.io)."""
 from polygon import RESTClient
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
@@ -10,12 +10,22 @@ class StockPriceService:
     """Fetch real-time and historical stock price data."""
     
     def __init__(self):
-        """Initialize Polygon.io client."""
-        self.client = RESTClient(settings.polygon_api_key)
+        """Initialize Massive.com API client (formerly Polygon.io)."""
+        if not settings.polygon_api_key:
+            self.client = None
+            print("Warning: Massive.com API key not configured. Stock price fetching will be disabled.")
+        else:
+            # Use the new Massive.com API endpoint (api.massive.com)
+            # The old api.polygon.io endpoint still works, but using the new one is recommended
+            self.client = RESTClient(
+                api_key=settings.polygon_api_key,
+                base="https://api.massive.com"  # New Massive.com endpoint
+            )
     
     def get_current_price(self, ticker: str) -> Optional[Dict]:
         """
         Get current stock price for a ticker.
+        Uses aggregates endpoint (available on free tier) as fallback if real-time is not available.
         
         Args:
             ticker: Stock ticker symbol
@@ -23,18 +33,17 @@ class StockPriceService:
         Returns:
             Dictionary with current price data or None
         """
+        if not self.client:
+            return None
+        
+        # Try real-time data first (if available on plan)
         try:
-            # Get last trade
             trade = self.client.get_last_trade(ticker)
-            
-            if not trade:
-                return None
-            
-            # Get current quote
-            try:
-                quote = self.client.get_last_quote(ticker)
-            except:
-                quote = None
+            if trade:
+                try:
+                    quote = self.client.get_last_quote(ticker)
+                except:
+                    quote = None
             
             return {
                 'ticker': ticker,
@@ -46,8 +55,48 @@ class StockPriceService:
                 'ask_size': quote.ask_size if quote else None
             }
         except Exception as e:
-            print(f"Error fetching price for {ticker}: {e}")
-            return None
+            error_msg = str(e)
+            # If not authorized for real-time, fall back to aggregates
+            if "NOT_AUTHORIZED" in error_msg or "not entitled" in error_msg.lower():
+                pass  # Will try aggregates below
+            else:
+                print(f"Error fetching real-time price for {ticker}: {e}")
+        
+        # Fallback to aggregates (available on free tier)
+        try:
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=1)
+            
+            aggs = self.client.get_aggs(
+                ticker=ticker,
+                multiplier=1,
+                timespan="day",
+                from_=start_date.strftime("%Y-%m-%d"),
+                to=end_date.strftime("%Y-%m-%d"),
+                limit=1
+            )
+            
+            if aggs and len(aggs) > 0:
+                latest = aggs[-1]  # Get most recent
+                return {
+                    'ticker': ticker,
+                    'price': latest.close,
+                    'timestamp': datetime.fromtimestamp(latest.timestamp / 1000) if hasattr(latest, 'timestamp') else datetime.utcnow(),
+                    'bid': None,
+                    'ask': None,
+                    'bid_size': None,
+                    'ask_size': None,
+                    'source': 'delayed'  # Indicate this is delayed data
+                }
+        except Exception as e:
+            error_msg = str(e)
+            if "Unknown API Key" in error_msg or "Invalid API key" in error_msg:
+                print(f"ERROR: Invalid Massive.com API key. Please check your POLYGON_API_KEY in .env file")
+                print(f"Get your API key from: https://massive.com/dashboard/api-keys")
+            else:
+                print(f"Error fetching price for {ticker}: {e}")
+        
+        return None
     
     def get_batch_prices(self, tickers: List[str]) -> Dict[str, Dict]:
         """
@@ -80,6 +129,8 @@ class StockPriceService:
         Returns:
             List of price data dictionaries
         """
+        if not self.client:
+            return []
         try:
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days)
@@ -120,6 +171,8 @@ class StockPriceService:
         Returns:
             Dictionary with price change data or None
         """
+        if not self.client:
+            return None
         try:
             current = self.get_current_price(ticker)
             if not current:

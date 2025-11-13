@@ -10,12 +10,40 @@ class DatabaseManager:
     """Manage DuckDB database for real-time analytics."""
     
     def __init__(self):
-        """Initialize database connection."""
+        """Initialize database connection (lazy connection)."""
         # Ensure data directory exists
         os.makedirs(os.path.dirname(settings.duckdb_path), exist_ok=True)
-        
-        self.conn = duckdb.connect(settings.duckdb_path)
-        self._initialize_schema()
+        self._conn = None
+        self._db_path = settings.duckdb_path
+        self._initialized = False
+    
+    @property
+    def conn(self):
+        """Lazy connection - connect only when needed."""
+        if self._conn is None:
+            # Try to connect with retry logic
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    self._conn = duckdb.connect(self._db_path, read_only=False)
+                    if not self._initialized:
+                        self._initialize_schema()
+                        self._initialized = True
+                    break
+                except Exception as e:
+                    if "lock" in str(e).lower() and attempt < max_retries - 1:
+                        import time
+                        time.sleep(2)
+                        continue
+                    else:
+                        # If still locked, try read-only mode for queries
+                        try:
+                            self._conn = duckdb.connect(self._db_path, read_only=True)
+                            print("Warning: Database opened in read-only mode due to lock")
+                            break
+                        except:
+                            raise
+        return self._conn
     
     def _initialize_schema(self):
         """Initialize database schema."""
@@ -152,10 +180,17 @@ class DatabaseManager:
     
     def insert_stock_price(self, price_data: Dict):
         """Insert stock price data."""
+        # Use INSERT ... ON CONFLICT for DuckDB with multiple unique constraints
         self.conn.execute("""
-            INSERT OR REPLACE INTO stock_prices (
+            INSERT INTO stock_prices (
                 ticker, timestamp, price, bid, ask, bid_size, ask_size
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (ticker, timestamp) DO UPDATE SET
+                price = EXCLUDED.price,
+                bid = EXCLUDED.bid,
+                ask = EXCLUDED.ask,
+                bid_size = EXCLUDED.bid_size,
+                ask_size = EXCLUDED.ask_size
         """, (
             price_data['ticker'],
             price_data.get('timestamp', datetime.utcnow()),
@@ -203,30 +238,76 @@ class DatabaseManager:
         ))
     
     def get_trending_tickers(self, hours: int = 24, limit: int = 20) -> List[Dict]:
-        """Get trending tickers based on mention volume and sentiment."""
-        query = """
-            SELECT 
-                tm.ticker,
-                COUNT(DISTINCT tm.mention_id) as mention_count,
-                AVG(sm.sentiment_combined) as avg_sentiment,
-                MAX(sp.price) as latest_price,
-                MAX(ts.price_change_percent_24h) as price_change_24h
-            FROM ticker_mentions tm
-            JOIN social_mentions sm ON tm.mention_id = sm.id
-            LEFT JOIN stock_prices sp ON tm.ticker = sp.ticker
-            LEFT JOIN ticker_stats ts ON tm.ticker = ts.ticker
-            WHERE tm.timestamp >= CURRENT_TIMESTAMP - INTERVAL ? HOUR
-            GROUP BY tm.ticker
-            ORDER BY mention_count DESC, avg_sentiment DESC
-            LIMIT ?
-        """
+        """Get trending tickers based on mention volume and sentiment, or stock prices if no mentions."""
+        # Check if we have any social mentions first
+        try:
+            count_result = self.conn.execute("SELECT COUNT(*) FROM ticker_mentions").fetchone()
+            has_mentions = count_result and count_result[0] > 0
+        except:
+            has_mentions = False
         
-        result = self.conn.execute(query, (hours, limit)).fetchall()
+        if has_mentions:
+            # Use proper DuckDB INTERVAL syntax
+            query = f"""
+                SELECT 
+                    tm.ticker,
+                    COUNT(DISTINCT tm.mention_id) as mention_count,
+                    AVG(sm.sentiment_combined) as avg_sentiment,
+                    MAX(sp.price) as latest_price,
+                    MAX(ts.price_change_percent_24h) as price_change_24h
+                FROM ticker_mentions tm
+                JOIN social_mentions sm ON tm.mention_id = sm.id
+                LEFT JOIN stock_prices sp ON tm.ticker = sp.ticker
+                LEFT JOIN ticker_stats ts ON tm.ticker = ts.ticker
+                WHERE tm.timestamp >= CURRENT_TIMESTAMP - INTERVAL '{hours}' HOUR
+                GROUP BY tm.ticker
+                ORDER BY mention_count DESC, avg_sentiment DESC
+                LIMIT {limit}
+            """
+        else:
+            # Fallback to stock prices only (Polygon mode) - get latest price per ticker
+            query = f"""
+                SELECT 
+                    ticker,
+                    0 as mention_count,
+                    0.0 as avg_sentiment,
+                    price as latest_price,
+                    NULL as price_change_24h
+                FROM (
+                    SELECT ticker, price, timestamp,
+                           ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY timestamp DESC) as rn
+                    FROM stock_prices
+                    WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '{hours}' HOUR
+                ) ranked
+                WHERE rn = 1
+                ORDER BY ticker
+                LIMIT {limit}
+            """
+        
+        try:
+            result = self.conn.execute(query).fetchall()
+            print(f"get_trending_tickers: Found {len(result)} tickers")
+        except Exception as e:
+            print(f"Error in get_trending_tickers query: {e}")
+            # Fallback: get any tickers with prices (simplest possible query)
+            try:
+                query_fallback = f"""
+                    SELECT ticker, 0, 0.0, price, NULL
+                    FROM stock_prices
+                    WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '{hours}' HOUR
+                    ORDER BY timestamp DESC
+                    LIMIT {limit}
+                """
+                result = self.conn.execute(query_fallback).fetchall()
+                print(f"Fallback query found {len(result)} tickers")
+            except Exception as e2:
+                print(f"Fallback query also failed: {e2}")
+                return []
         
         return [
             {
                 'ticker': row[0],
-                'mention_count': row[1],
+                'mention_count': row[1] if row[1] else 0,
                 'avg_sentiment': row[2] if row[2] else 0.0,
                 'latest_price': row[3],
                 'price_change_24h': row[4]
@@ -236,19 +317,23 @@ class DatabaseManager:
     
     def get_ticker_sentiment_trend(self, ticker: str, hours: int = 24) -> List[Dict]:
         """Get sentiment trend for a ticker over time."""
-        query = """
+        query = f"""
             SELECT 
                 DATE_TRUNC('hour', tm.timestamp) as hour,
                 COUNT(*) as mention_count,
                 AVG(sm.sentiment_combined) as avg_sentiment
             FROM ticker_mentions tm
             JOIN social_mentions sm ON tm.mention_id = sm.id
-            WHERE tm.ticker = ? AND tm.timestamp >= CURRENT_TIMESTAMP - INTERVAL ? HOUR
+            WHERE tm.ticker = '{ticker.upper()}' AND tm.timestamp >= CURRENT_TIMESTAMP - INTERVAL '{hours}' HOUR
             GROUP BY hour
             ORDER BY hour
         """
         
-        result = self.conn.execute(query, (ticker, hours)).fetchall()
+        try:
+            result = self.conn.execute(query).fetchall()
+        except Exception as e:
+            print(f"Error in get_ticker_sentiment_trend: {e}")
+            return []
         
         return [
             {
@@ -261,14 +346,18 @@ class DatabaseManager:
     
     def get_ticker_price_history(self, ticker: str, days: int = 7) -> List[Dict]:
         """Get price history for a ticker."""
-        query = """
+        query = f"""
             SELECT date, open, high, low, close, volume
             FROM historical_prices
-            WHERE ticker = ? AND date >= CURRENT_DATE - INTERVAL ? DAYS
+            WHERE ticker = '{ticker.upper()}' AND date >= CURRENT_DATE - INTERVAL '{days}' DAYS
             ORDER BY date
         """
         
-        result = self.conn.execute(query, (ticker, days)).fetchall()
+        try:
+            result = self.conn.execute(query).fetchall()
+        except Exception as e:
+            print(f"Error in get_ticker_price_history: {e}")
+            return []
         
         return [
             {
@@ -284,5 +373,11 @@ class DatabaseManager:
     
     def close(self):
         """Close database connection."""
-        self.conn.close()
+        if self._conn:
+            try:
+                self._conn.close()
+            except Exception as e:
+                print(f"Warning: Error closing database connection: {e}")
+            finally:
+                self._conn = None
 

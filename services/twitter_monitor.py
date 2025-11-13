@@ -13,10 +13,14 @@ class TwitterMonitor:
     
     def __init__(self):
         """Initialize Twitter monitor."""
-        self.client = tweepy.Client(
-            bearer_token=settings.twitter_bearer_token,
-            wait_on_rate_limit=True
-        )
+        if not settings.twitter_bearer_token:
+            self.client = None
+            print("Warning: Twitter API credentials not configured. Twitter monitoring will be disabled.")
+        else:
+            self.client = tweepy.Client(
+                bearer_token=settings.twitter_bearer_token,
+                wait_on_rate_limit=True
+            )
         self.ticker_extractor = TickerExtractor()
         self.sentiment_analyzer = SentimentAnalyzer()
         self.processed_ids = set()
@@ -32,6 +36,8 @@ class TwitterMonitor:
         Returns:
             List of tweet data dictionaries
         """
+        if not self.client:
+            return []
         try:
             tweets = self.client.search_recent_tweets(
                 query=query,
@@ -127,4 +133,3 @@ class TwitterMonitor:
             
             # Wait before next iteration
             time.sleep(60)  # Check every minute
-

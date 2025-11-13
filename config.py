@@ -7,15 +7,15 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
     # Reddit API
-    reddit_client_id: str
-    reddit_client_secret: str
+    reddit_client_id: Optional[str] = None
+    reddit_client_secret: Optional[str] = None
     reddit_user_agent: str = "MemeStockTracker/1.0"
     
     # Twitter API
-    twitter_bearer_token: str
+    twitter_bearer_token: Optional[str] = None
     
-    # Polygon.io API
-    polygon_api_key: str
+    # Massive.com API (formerly Polygon.io)
+    polygon_api_key: Optional[str] = None
     
     # Database
     duckdb_path: str = "./data/meme_stocks.duckdb"

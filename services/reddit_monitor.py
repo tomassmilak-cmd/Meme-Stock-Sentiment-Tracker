@@ -13,12 +13,17 @@ class RedditMonitor:
     
     def __init__(self):
         """Initialize Reddit monitor."""
-        self.reddit = praw.Reddit(
-            client_id=settings.reddit_client_id,
-            client_secret=settings.reddit_client_secret,
-            user_agent=settings.reddit_user_agent
-        )
-        self.subreddit = self.reddit.subreddit(settings.reddit_subreddit)
+        if not settings.reddit_client_id or not settings.reddit_client_secret:
+            self.reddit = None
+            self.subreddit = None
+            print("Warning: Reddit API credentials not configured. Reddit monitoring will be disabled.")
+        else:
+            self.reddit = praw.Reddit(
+                client_id=settings.reddit_client_id,
+                client_secret=settings.reddit_client_secret,
+                user_agent=settings.reddit_user_agent
+            )
+            self.subreddit = self.reddit.subreddit(settings.reddit_subreddit)
         self.ticker_extractor = TickerExtractor()
         self.sentiment_analyzer = SentimentAnalyzer()
         self.processed_ids = set()
@@ -30,6 +35,8 @@ class RedditMonitor:
         Yields:
             Dictionary with post data and extracted tickers
         """
+        if not self.subreddit:
+            return
         for submission in self.subreddit.stream.submissions(skip_existing=True):
             if submission.id in self.processed_ids:
                 continue
@@ -72,6 +79,8 @@ class RedditMonitor:
         Yields:
             Dictionary with comment data and extracted tickers
         """
+        if not self.subreddit:
+            return
         for comment in self.subreddit.stream.comments(skip_existing=True):
             if comment.id in self.processed_ids:
                 continue
@@ -113,6 +122,8 @@ class RedditMonitor:
         Returns:
             List of post data dictionaries
         """
+        if not self.subreddit:
+            return []
         posts = []
         
         for submission in self.subreddit.new(limit=limit):

@@ -9,7 +9,7 @@ import time
 from typing import Dict, List
 
 # Configuration
-API_URL = "http://localhost:8000"  # Change if API is hosted elsewhere
+API_URL = "http://127.0.0.1:8000"  # Change if API is hosted elsewhere
 
 st.set_page_config(
     page_title="Meme Stock Sentiment Tracker",
@@ -38,64 +38,81 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=10)  # Reduced TTL for faster updates
 def fetch_trending_tickers(hours: int = 24, limit: int = 20) -> List[Dict]:
     """Fetch trending tickers from API."""
     try:
-        response = requests.get(f"{API_URL}/api/trending", params={"hours": hours, "limit": limit})
+        response = requests.get(f"{API_URL}/api/trending", params={"hours": hours, "limit": limit}, timeout=10)
         if response.status_code == 200:
-            return response.json().get("tickers", [])
+            data = response.json()
+            tickers = data.get("tickers", [])
+            return tickers
+        else:
+            return []
+    except requests.exceptions.RequestException as e:
+        return []
     except Exception as e:
-        st.error(f"Error fetching trending tickers: {e}")
-    return []
+        return []
 
 
 @st.cache_data(ttl=30)
 def fetch_ticker_stats(ticker: str, hours: int = 24) -> Dict:
     """Fetch stats for a specific ticker."""
     try:
-        response = requests.get(f"{API_URL}/api/ticker/{ticker}/stats", params={"hours": hours})
+        response = requests.get(f"{API_URL}/api/ticker/{ticker}/stats", params={"hours": hours}, timeout=5)
         if response.status_code == 200:
             return response.json()
+        else:
+            return {}
+    except requests.exceptions.RequestException as e:
+        return {}
     except Exception as e:
-        st.error(f"Error fetching ticker stats: {e}")
-    return {}
+        return {}
 
 
 @st.cache_data(ttl=30)
 def fetch_ticker_sentiment(ticker: str, hours: int = 24) -> List[Dict]:
     """Fetch sentiment trend for a ticker."""
     try:
-        response = requests.get(f"{API_URL}/api/ticker/{ticker}/sentiment", params={"hours": hours})
+        response = requests.get(f"{API_URL}/api/ticker/{ticker}/sentiment", params={"hours": hours}, timeout=5)
         if response.status_code == 200:
             return response.json().get("trend", [])
+        else:
+            return []
+    except requests.exceptions.RequestException as e:
+        return []
     except Exception as e:
-        st.error(f"Error fetching sentiment: {e}")
-    return []
+        return []
 
 
 @st.cache_data(ttl=60)
 def fetch_ticker_price_history(ticker: str, days: int = 7) -> List[Dict]:
     """Fetch price history for a ticker."""
     try:
-        response = requests.get(f"{API_URL}/api/ticker/{ticker}/price-history", params={"days": days})
+        response = requests.get(f"{API_URL}/api/ticker/{ticker}/price-history", params={"days": days}, timeout=5)
         if response.status_code == 200:
             return response.json().get("history", [])
+        else:
+            return []
+    except requests.exceptions.RequestException as e:
+        return []
     except Exception as e:
-        st.error(f"Error fetching price history: {e}")
-    return []
+        return []
 
 
 @st.cache_data(ttl=30)
 def fetch_anomalies(hours: int = 24) -> List[Dict]:
     """Fetch detected anomalies."""
     try:
-        response = requests.get(f"{API_URL}/api/anomalies", params={"hours": hours})
+        response = requests.get(f"{API_URL}/api/anomalies", params={"hours": hours}, timeout=5)
         if response.status_code == 200:
             return response.json().get("anomalies", [])
+        else:
+            return []
+    except requests.exceptions.RequestException as e:
+        return []
     except Exception as e:
-        st.error(f"Error fetching anomalies: {e}")
-    return []
+        return []
 
 
 def main():
@@ -113,10 +130,16 @@ def main():
             format_func=lambda x: f"{x} hours"
         )
         
-        auto_refresh = st.checkbox("Auto Refresh", value=True)
+        auto_refresh = st.checkbox("Auto Refresh", value=False)
         refresh_interval = st.slider("Refresh Interval (seconds)", 10, 300, 30)
         
         if st.button("🔄 Refresh Now"):
+            st.cache_data.clear()
+            st.rerun()
+        
+        # Auto-refresh if enabled
+        if auto_refresh:
+            time.sleep(refresh_interval)
             st.cache_data.clear()
             st.rerun()
         
@@ -132,7 +155,47 @@ def main():
     with tab1:
         st.header("🔥 Trending Tickers Leaderboard")
         
-        trending = fetch_trending_tickers(hours=time_window, limit=50)
+        # Auto-start tracking if no data
+        try:
+            trending = fetch_trending_tickers(hours=time_window, limit=50)
+        except Exception as e:
+            st.error(f"Error fetching trending tickers: {e}")
+            trending = []
+        
+        # If no data, automatically start tracking
+        if not trending:
+            col1, col2 = st.columns([3, 1])
+            with col2:
+                if st.button("🚀 Start Tracking", help="Start collecting data from Twitter and Polygon", type="primary"):
+                    try:
+                        # Start tracking popular stocks (now runs in background)
+                        response2 = requests.post(f"{API_URL}/api/track-popular", timeout=15)
+                        if response2.status_code == 200:
+                            data = response2.json()
+                            st.success(f"✅ {data.get('message', 'Tracking started!')}")
+                            if data.get('tracked'):
+                                st.info(f"Tracking {len(data['tracked'])} tickers: {', '.join(data['tracked'][:5])}...")
+                        else:
+                            st.warning(f"Track status: {response2.status_code}")
+                        
+                        # Start monitoring
+                        try:
+                            response = requests.post(f"{API_URL}/api/monitor/start", timeout=5)
+                            if response.status_code == 200:
+                                st.success("Monitoring started!")
+                        except:
+                            pass  # Monitoring is optional
+                        
+                        st.cache_data.clear()
+                        time.sleep(2)  # Give API a moment to collect data
+                        st.rerun()
+                    except requests.exceptions.Timeout:
+                        st.warning("⏱️ Request timed out, but tracking may have started. Refreshing...")
+                        st.cache_data.clear()
+                        time.sleep(2)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error starting tracking: {e}")
         
         if trending:
             df = pd.DataFrame(trending)
@@ -188,7 +251,36 @@ def main():
                 )
                 st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("No trending tickers found. Make sure monitoring is active.")
+            st.info("📊 No trending tickers found yet.")
+            st.markdown("""
+            **To start collecting data:**
+            1. Click the "🚀 Start Tracking" button above
+            2. Or manually start monitoring:
+               ```bash
+               curl -X POST http://localhost:8000/api/monitor/start
+               curl -X POST http://localhost:8000/api/track-popular
+               ```
+            3. Wait a few moments for data to be collected
+            4. Click "🔄 Refresh Now" in the sidebar to update
+            
+            **Note:** The dashboard will show data once stock prices and social media mentions are collected.
+            """)
+            
+            # Show current API status
+            try:
+                status_response = requests.get(f"{API_URL}/api/status", timeout=3)
+                if status_response.status_code == 200:
+                    status = status_response.json()
+                    st.markdown("### 🔧 API Status")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.write(f"**Polygon:** {'✅' if status.get('polygon_working') else '❌'}")
+                    with col2:
+                        st.write(f"**Twitter:** {'✅' if status.get('twitter_configured') else '❌'}")
+                    with col3:
+                        st.write(f"**Reddit:** {'✅' if status.get('reddit_configured') else '❌'}")
+            except:
+                pass
     
     with tab2:
         st.header("📈 Individual Ticker Analysis")
@@ -343,10 +435,10 @@ def main():
         - Docker for containerization
         """)
     
-    # Auto-refresh
-    if auto_refresh:
-        time.sleep(refresh_interval)
-        st.rerun()
+    # Auto-refresh (commented out to prevent issues - use manual refresh button instead)
+    # if auto_refresh:
+    #     time.sleep(refresh_interval)
+    #     st.rerun()
 
 
 if __name__ == "__main__":
