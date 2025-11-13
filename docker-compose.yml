@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: meme_stock_api
+    ports:
+      - "8000:8000"
+    environment:
+      - REDDIT_CLIENT_ID=${REDDIT_CLIENT_ID}
+      - REDDIT_CLIENT_SECRET=${REDDIT_CLIENT_SECRET}
+      - REDDIT_USER_AGENT=${REDDIT_USER_AGENT}
+      - TWITTER_BEARER_TOKEN=${TWITTER_BEARER_TOKEN}
+      - POLYGON_API_KEY=${POLYGON_API_KEY}
+      - DUCKDB_PATH=/app/data/meme_stocks.duckdb
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    container_name: meme_stock_dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      - DUCKDB_PATH=/app/data/meme_stocks.duckdb
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  collector:
+    build: .
+    container_name: meme_stock_collector
+    environment:
+      - REDDIT_CLIENT_ID=${REDDIT_CLIENT_ID}
+      - REDDIT_CLIENT_SECRET=${REDDIT_CLIENT_SECRET}
+      - REDDIT_USER_AGENT=${REDDIT_USER_AGENT}
+      - TWITTER_BEARER_TOKEN=${TWITTER_BEARER_TOKEN}
+      - POLYGON_API_KEY=${POLYGON_API_KEY}
+      - DUCKDB_PATH=/app/data/meme_stocks.duckdb
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: python collector/main.py
+    restart: unless-stopped
+
