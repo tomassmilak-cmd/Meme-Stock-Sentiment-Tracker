@@ -19,18 +19,22 @@ echo "🚀 Starting API server..."
 cd "$(dirname "$0")"
 python3 -m uvicorn api.main:app --host 127.0.0.1 --port 8000 > /tmp/api.log 2>&1 &
 
-# Wait a moment for server to start
-sleep 3
+# Wait for server to start (retry up to 10 times with 2 second delays)
+echo "   Waiting for server to be ready..."
+for i in {1..10}; do
+    sleep 2
+    if curl -s http://127.0.0.1:8000/health > /dev/null 2>&1; then
+        echo "✅ API server started successfully!"
+        echo "   Health check: http://127.0.0.1:8000/health"
+        echo "   API docs: http://127.0.0.1:8000/docs"
+        echo "   Logs: tail -f /tmp/api.log"
+        exit 0
+    fi
+    echo "   Still starting... ($i/10)"
+done
 
-# Check if server started successfully
-if curl -s http://127.0.0.1:8000/health > /dev/null 2>&1; then
-    echo "✅ API server started successfully!"
-    echo "   Health check: http://127.0.0.1:8000/health"
-    echo "   API docs: http://127.0.0.1:8000/docs"
-    echo "   Logs: tail -f /tmp/api.log"
-else
-    echo "❌ API server failed to start. Check logs:"
-    echo "   tail -f /tmp/api.log"
-    exit 1
-fi
+echo "❌ API server did not respond after 20 seconds. Check logs:"
+echo "   tail -f /tmp/api.log"
+tail -10 /tmp/api.log
+exit 1
 
